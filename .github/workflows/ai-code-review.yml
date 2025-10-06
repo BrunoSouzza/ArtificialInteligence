@@ -2,7 +2,8 @@ name: PR Code Analyzer (Azure OpenAI)
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: ["**"]
 
 permissions:
   contents: read
@@ -13,25 +14,66 @@ jobs:
   analyze:
     environment: DEV
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout PR HEAD with full history
         uses: actions/checkout@v4
+        with:
+          # pega o commit exato do HEAD da PR e TODO o histórico
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Ensure base and head SHAs are available locally (handles forks)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          BASE_REPO="${{ github.event.pull_request.base.repo.full_name }}"
+          HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
+          IS_FORK="${{ github.event.pull_request.head.repo.fork }}"
+
+          echo "Base repo: $BASE_REPO | Base SHA: $BASE_SHA"
+          echo "Head repo: $HEAD_REPO | Head SHA: $HEAD_SHA | Is fork: $IS_FORK"
+
+          # Garante que o BASE_SHA existe localmente (no origin do repo base)
+          git remote set-url origin "https://github.com/$BASE_REPO.git"
+          git fetch --no-tags --prune --depth=2 origin $BASE_SHA || \
+            git fetch --no-tags --prune origin "+refs/heads/*:refs/remotes/origin/*"
+
+          # Se for fork, precisamos adicionar o remote do fork para buscar o HEAD_SHA
+          if [ "$IS_FORK" = "true" ]; then
+            git remote add fork "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$HEAD_REPO.git" || true
+            git fetch --no-tags --prune --depth=2 fork $HEAD_SHA
+          else
+            # PR do mesmo repo: o HEAD_SHA normalmente já veio no checkout,
+            # mas garantimos que está disponível
+            git fetch --no-tags --prune --depth=2 origin $HEAD_SHA || true
+          fi
+
+          echo "Available commits:"
+          git rev-parse --verify $BASE_SHA
+          git rev-parse --verify $HEAD_SHA
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests PyGithub
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
 
       - name: Run PR Analyzer
-        run: python .github/scripts/ai_reviewer.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
           AZURE_OPENAI_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_DEPLOYMENT_NAME }}
           AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
-          AZURE_OPENAI_API_VERSION: ${{ secrets.AZURE_OPENAI_API_VERSION }}
+          # Opcional
+          AUTO_COMMIT: "false"
+        run: |
+          python .github/scripts/ai_reviewer.py
