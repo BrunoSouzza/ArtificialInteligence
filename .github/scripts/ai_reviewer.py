@@ -34,7 +34,7 @@ head_sha = pr["head"]["sha"]
 AZ_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZ_API_KEY = os.getenv("AZURE_OPENAI_KEY")
 AZ_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-AUTO_COMMIT = (os.getenv("AUTO_COMMIT", "false").lower() == "true")
+AUTO_COMMIT = os.getenv("AUTO_COMMIT", "false")
 
 # ---------- Helpers ----------
 def run(cmd: str) -> str:
@@ -121,15 +121,9 @@ def main():
     body = "### ?? AI Code Review\n\n" + review
     post_pr_comment(body)
 
-    # Safe mode: do not auto-apply patch.
-    # If you want auto-commit, generate a valid patch (git apply) or use the suggested changes API.
-    if AUTO_COMMIT:
-        print("AUTO_COMMIT requested, but this sample keeps changes as suggestions only for safety.")
-        # Robust strategy (implement later):
-        # 1) Parse suggestion blocks
-        # 2) Map to exact files/lines
-        # 3) Edit files locally and git commit/push
-        # Intentionally disabled for safety.
+    # Removido: lógica de auto-commit e aplicação de patch.
+    # As sugestões serão exibidas como blocos de sugestão no comentário do PR.
+    # O botão "Commit suggestion" aparecerá automaticamente no GitHub para cada bloco de sugestão.
 
     print("AI review completed.")
 
