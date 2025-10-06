@@ -32,7 +32,7 @@ head_sha = pr["head"]["sha"]
 
 # ---------- Azure OpenAI ----------
 AZ_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZ_API_KEY = os.getenv("AZURE_OPENAI_KEY")
+AZ_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZ_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 AUTO_COMMIT = (os.getenv("AUTO_COMMIT", "false").lower() == "true")
 
@@ -51,7 +51,7 @@ def gather_changed_files(base: str, head: str):
 def call_azure_openai(system_prompt: str, user_prompt: str) -> str:
     if not (AZ_ENDPOINT and AZ_API_KEY and AZ_DEPLOYMENT):
         raise RuntimeError("Azure OpenAI vars missing")
-    url = f"{AZ_ENDPOINT}/openai/deployments/{AZ_DEPLOYMENT}/chat/completions?api-version=2024-10-01-preview"
+    url = f"{AZ_ENDPOINT}/openai/deployments/{AZ_DEPLOYMENT}/chat/completions?api-version=2025-01-01-preview"
     headers = {"api-key": AZ_API_KEY, "Content-Type": "application/json"}
     payload = {
         "messages": [
@@ -117,19 +117,19 @@ def main():
     with open("ai_suggestions.md", "w", encoding="utf-8") as f:
         f.write(review)
 
-    # Posta coment·rio na PR
-    body = "### ?? AI Code Review\n\n" + review
+    # Posta coment√°rio na PR
+    body = "### ü§ñ AI Code Review\n\n" + review
     post_pr_comment(body)
 
-    # Modo seguro: n„o gerar/apply patch automaticamente.
-    # Se quiser auto-commit real, gere um patch v·lido (git apply) ou use a API de "suggested changes" via review.
+    # Modo seguro: n√£o gerar/apply patch automaticamente.
+    # Se quiser auto-commit real, gere um patch v√°lido (git apply) ou use a API de "suggested changes" via review.
     if AUTO_COMMIT:
         print("AUTO_COMMIT requested, but this sample keeps changes as suggestions only for safety.")
-        # EstratÈgia robusta (implantar depois):
+        # Estrat√©gia robusta (implantar depois):
         # 1) Fazer parsing de blocos ```suggestion
         # 2) Mapear para arquivos/linhas exatas
         # 3) Editar arquivos localmente e dar git commit/push
-        # Aqui deixamos intencionalmente desativado por seguranÁa.
+        # Aqui deixamos intencionalmente desativado por seguran√ßa.
 
     print("AI review completed.")
 
