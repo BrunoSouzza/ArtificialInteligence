@@ -7,8 +7,8 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write           # necess·rio p/ push autom·tico (opcional)
-  pull-requests: write      # necess·rio p/ comentar na PR
+  contents: write           # necess√°rio p/ push autom√°tico (opcional)
+  pull-requests: write      # necess√°rio p/ comentar na PR
 
 jobs:
   ai-review:
@@ -31,7 +31,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests unidiff
+          pip install requests unidiff PyGithub
 
       - name: Run AI Reviewer
         env:
