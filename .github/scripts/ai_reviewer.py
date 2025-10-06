@@ -1,437 +1,137 @@
-#!/usr/bin/env python3
-import os
-import re
-import json
-import requests
-import textwrap
-from typing import List, Dict, Any
-from github import Github, Auth
+# -*- coding: utf-8 -*-
+import os, sys, json, subprocess, pathlib, textwrap, requests
 
-"""
-pr_analyzer.py (LLM-driven) - ignora sempre o próprio arquivo.
+ALLOWED_EXTS = {
+    ".cs", ".csproj", ".sln",
+    ".ts", ".tsx", ".js", ".jsx",
+    ".py",
+    ".json", ".yml", ".yaml",
+    ".md"
+}
 
-Fluxo:
-1. Coleta diff (patch) dos arquivos modificados do PR, EXCETO sempre .github/scripts/pr_analyzer.py
-2. Envia patch ao Azure OpenAI com instruções para retornar JSON estruturado.
-3. Valida cada sugestão (todas as linhas originais devem existir como linhas adicionadas no diff).
-4. Publica/atualiza comentário principal + cria review com comentários inline (blocos `suggestion`).
-5. Se só o pr_analyzer.py foi alterado, encerra sem comentar.
+# ---------- GitHub context ----------
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
+GITHUB_EVENT_PATH = os.getenv("GITHUB_EVENT_PATH")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-Config obrigatória:
-  AZURE_OPENAI_ENDPOINT
-  AZURE_OPENAI_API_KEY
-O restante possui defaults:
-  AZURE_OPENAI_DEPLOYMENT_NAME (default: gpt-4o)
-  AZURE_OPENAI_API_VERSION (default: 2024-10-21)
-  MAX_PATCH_CHARS (default: 120000)
-  MAX_SUGGESTIONS (default: 15)
-  ALLOW_MULTI_LINE (default: false)
-  OPENAI_TEMPERATURE (default: 0.2)
-  ENABLE_INLINE_SUGGESTIONS (default: true)
-  COMMENT_TAG (default: azure-openai-pr-review)
-"""
+if not (GITHUB_REPOSITORY and GITHUB_EVENT_PATH and GITHUB_TOKEN):
+    print("Missing GitHub environment variables.")
+    sys.exit(1)
 
-# Arquivos sempre ignorados (pode expandir se necessário)
-EXCLUDED_ALWAYS = {".github/scripts/pr_analyzer.py"}
+with open(GITHUB_EVENT_PATH, "r", encoding="utf-8") as f:
+    event = json.load(f)
 
-# --------------------------------------------------
-# Patch / PR
-# --------------------------------------------------
-def get_pr_and_patch(repo_fullname: str, pr_number: int, gh_token: str):
-    g = Github(auth=Auth.Token(gh_token))
-    repo = g.get_repo(repo_fullname)
-    pr = repo.get_pull(pr_number)
+if "pull_request" not in event:
+    print("This workflow should be triggered by pull_request.")
+    sys.exit(0)
 
-    patch_text = ""
-    files_meta = []
-    for f in pr.get_files():
-        if f.filename in EXCLUDED_ALWAYS:
-            print(f"[INFO] Ignorando arquivo sempre excluído: {f.filename}")
-            continue
-        if f.patch:
-            patch_text += f"\n### {f.filename}\n```diff\n{f.patch}\n```\n"
-            files_meta.append({
-                "filename": f.filename,
-                "status": f.status,
-                "additions": f.additions,
-                "deletions": f.deletions
-            })
+pr = event["pull_request"]
+pr_number = pr["number"]
+base_sha = pr["base"]["sha"]
+head_sha = pr["head"]["sha"]
 
-    max_chars = int(os.environ.get("MAX_PATCH_CHARS", "120000"))
-    truncated = False
-    if len(patch_text) > max_chars:
-        patch_text = patch_text[:max_chars] + "\n\n[TRUNCATED]"
-        truncated = True
+# ---------- Azure OpenAI ----------
+AZ_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZ_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZ_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+AUTO_COMMIT = (os.getenv("AUTO_COMMIT", "false").lower() == "true")
 
-    return pr, repo, patch_text.strip(), files_meta, truncated
+# ---------- Helpers ----------
+def run(cmd: str) -> str:
+    return subprocess.check_output(cmd, shell=True, text=True).strip()
 
-# --------------------------------------------------
-# LLM Call
-# --------------------------------------------------
-def call_llm_for_suggestions(patch: str, truncated: bool) -> Dict[str, Any]:
-    endpoint = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
-    api_key = os.environ["AZURE_OPENAI_API_KEY"]
-    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
-    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
-    max_suggestions = int(os.environ.get("MAX_SUGGESTIONS", "15"))
-    allow_multi_line = os.environ.get("ALLOW_MULTI_LINE", "false").lower() == "true"
+def git_diff(base: str, head: str) -> str:
+    # diff unificado com contexto suficiente
+    return run(f"git diff {base}..{head}")
 
-    url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
-    print(f"[DEBUG] Azure OpenAI: deployment={deployment} api_version={api_version}")
+def gather_changed_files(base: str, head: str):
+    out = run(f"git diff --name-only {base}..{head}")
+    return [f for f in out.splitlines() if pathlib.Path(f).suffix in ALLOWED_EXTS]
 
-    trunc_note = "PATCH TRUNCADO — limite a análise ao conteúdo visível." if truncated else ""
-
-    raw_prompt = f"""
-    Você é um revisor sênior de código C#/.NET. Gere melhorias concretas.
-
-    REQUISITOS:
-    - Analise APENAS o patch fornecido.
-    - NÃO invente arquivos ou trechos inexistentes.
-    - Gere no máximo {max_suggestions} sugestões.
-    - Cada sugestão deve focar em benefício claro (bug, segurança, performance, legibilidade, SOLID, testabilidade).
-    - Não sugerir renomeações cosméticas sem ganho técnico real.
-    - Para cada sugestão definir:
-        id (S001, S002...),
-        file,
-        severity (low|medium|high),
-        type (improvement|bug|security|performance|readability|testability),
-        categories (array),
-        original (array de 1..N linhas adicionadas exatamente como aparecem no patch sem o '+'),
-        replacement (array do mesmo tamanho),
-        rationale (explicação objetiva).
-    - allow_multi_line={allow_multi_line}; se false, apenas 1 linha por sugestão.
-    - Linhas em 'original' DEVEM ser linhas ADICIONADAS (prefixo '+', mas sem incluir o '+').
-    - Mantenha a lógica; não remova comportamento sem justificar.
-    - Se não houver melhorias relevantes, retorne suggestions: [].
-
-    SAÍDA JSON EXATA (sem texto fora do JSON):
-    {{
-      "summary": "string",
-      "verdict": "OK|Needs Work|Blocker",
-      "suggestions": [
-        {{
-          "id": "S001",
-          "file": "caminho/Arquivo.cs",
-          "severity": "low|medium|high",
-          "type": "improvement|bug|security|performance|readability|testability",
-          "categories": ["CleanCode","SOLID"],
-          "original": ["linha exata"],
-          "replacement": ["linha substituída"],
-          "rationale": "Explicação objetiva"
-        }}
-      ]
-    }}
-
-    {trunc_note}
-
-    PATCH:
-    {patch}
-    """
-    user_prompt = textwrap.dedent(raw_prompt).strip()
-
-    body = {
+def call_azure_openai(system_prompt: str, user_prompt: str) -> str:
+    if not (AZ_ENDPOINT and AZ_API_KEY and AZ_DEPLOYMENT):
+        raise RuntimeError("Azure OpenAI vars missing")
+    url = f"{AZ_ENDPOINT}/openai/deployments/{AZ_DEPLOYMENT}/chat/completions?api-version=2025-01-01-preview"
+    headers = {"api-key": AZ_API_KEY, "Content-Type": "application/json"}
+    payload = {
         "messages": [
-            {
-                "role": "system",
-                "content": "Você é um revisor de código automatizado especializado em C# e arquitetura .NET. Responda apenas com JSON válido."
-            },
-            {"role": "user", "content": user_prompt}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ],
-        "temperature": float(os.environ.get("OPENAI_TEMPERATURE", "0.2")),
-        "response_format": {"type": "json_object"}
+        "temperature": 0.2,
     }
+    r = requests.post(url, headers=headers, json=payload, timeout=120)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
 
-    headers = {"Content-Type": "application/json", "api-key": api_key}
-    res = requests.post(url, headers=headers, json=body, timeout=180)
-    if not res.ok:
-        raise RuntimeError(f"Azure OpenAI request failed: {res.status_code} {res.text}")
+def post_pr_comment(body: str):
+    owner, repo = GITHUB_REPOSITORY.split("/")
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+    r = requests.post(url, headers=headers, json={"body": body})
+    if r.status_code >= 300:
+        print("Failed to post PR comment:", r.status_code, r.text)
 
-    data = res.json()
-    raw_content = None
-    if "choices" in data and data["choices"]:
-        raw_content = data["choices"][0]["message"]["content"]
-    elif "output" in data:
-        raw_content = json.dumps(data["output"], ensure_ascii=False)
-    else:
-        raw_content = json.dumps(data, ensure_ascii=False)
+def build_prompt(diff_text: str) -> str:
+    instructions = textwrap.dedent("""\
+    You are a senior code reviewer. Review the provided unified diff from a GitHub Pull Request.
+    - Identify bugs, smells, missing validations, performance or security issues.
+    - When proposing small edits, use GitHub-style code suggestions with fenced blocks:
 
-    parsed = extract_first_json(raw_content)
-    return parsed
 
-def extract_first_json(text: str) -> Dict[str, Any]:
-    text = text.strip()
-    if text.startswith('{'):
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-    first = text.find('{')
-    last = text.rfind('}')
-    if first != -1 and last != -1 and last > first:
-        snippet = text[first:last+1]
-        try:
-            return json.loads(snippet)
-        except Exception:
-            pass
-    return {
-        "summary": "Falha ao interpretar JSON do modelo.",
-        "verdict": "Needs Work",
-        "suggestions": []
-    }
+```
+      <replacement code>
 
-# --------------------------------------------------
-# Diff parsing & validation
-# --------------------------------------------------
-def build_added_lines_index(patch: str) -> Dict[str, Dict[int, str]]:
-    result: Dict[str, Dict[int, str]] = {}
-    current_file = None
-    inside = False
-    new_line_no = None
+```
 
-    for raw in patch.splitlines():
-        line = raw.rstrip('\n')
+    - Keep suggestions minimal and directly applicable.
+    - For larger refactors, describe the change and include the most critical snippet as a suggestion.
+    - IMPORTANT: Preserve indentation and syntax; do not include file headers inside suggestion blocks.
+    """).strip()
+    return instructions + "\n\nDIFF:\n" + diff_text
 
-        if line.startswith("### "):
-            current_file = line[4:].strip()
-            result[current_file] = {}
-            continue
-
-        if line.startswith("```diff"):
-            inside = True
-            continue
-        if line.startswith("```") and inside:
-            inside = False
-            current_file = None
-            new_line_no = None
-            continue
-        if not inside or current_file is None:
-            continue
-
-        if line.startswith('@@'):
-            m = re.search(r"\+(\d+)", line)
-            if m:
-                new_line_no = int(m.group(1))
-            continue
-        if new_line_no is None:
-            continue
-
-        if line.startswith('+') and not line.startswith('+++'):
-            content = line[1:]
-            result[current_file][new_line_no] = content
-            new_line_no += 1
-        elif line.startswith('-') and not line.startswith('---'):
-            continue
-        else:
-            new_line_no += 1
-
-    return result
-
-def validate_and_localize_suggestions(model_data: Dict[str, Any],
-                                      added_index: Dict[str, Dict[int, str]],
-                                      allow_multi_line: bool) -> List[Dict[str, Any]]:
-    suggestions = model_data.get("suggestions") or []
-    if not isinstance(suggestions, list):
-        return []
-
-    validated = []
-    for s in suggestions:
-        try:
-            file = s["file"]
-            original_lines = s["original"]
-            replacement = s["replacement"]
-            if (not isinstance(original_lines, list)
-                or not isinstance(replacement, list)
-                or len(original_lines) == 0
-                or len(original_lines) != len(replacement)):
-                continue
-            if file not in added_index:
-                continue
-            if not allow_multi_line and len(original_lines) > 1:
-                continue
-            match_start = find_sequence_in_added(added_index[file], original_lines)
-            if match_start is None:
-                continue
-            s["_line_start"] = match_start
-            s["_line_end"] = match_start + len(original_lines) - 1
-            validated.append(s)
-        except Exception:
-            continue
-    return validated
-
-def find_sequence_in_added(file_lines_map: Dict[int, str], original_lines: List[str]) -> int or None:
-    if len(original_lines) == 1:
-        target = original_lines[0].strip()
-        for ln, content in file_lines_map.items():
-            if content.strip() == target:
-                return ln
-        return None
-    first = original_lines[0].strip()
-    candidates = [ln for ln, c in file_lines_map.items() if c.strip() == first]
-    for start_ln in candidates:
-        ok = True
-        for offset, expected in enumerate(original_lines):
-            ln = start_ln + offset
-            if file_lines_map.get(ln, "").strip() != expected.strip():
-                ok = False
-                break
-        if ok:
-            return start_ln
-    return None
-
-# --------------------------------------------------
-# Output (comment + review)
-# --------------------------------------------------
-def build_main_comment(model_data: Dict[str, Any], validated: List[Dict[str, Any]], marker: str) -> str:
-    summary = model_data.get("summary", "(sem resumo)")
-    verdict = model_data.get("verdict", "Needs Work")
-
-    lines = []
-    if validated:
-        lines.append("| ID | Arquivo | Sev | Tipo | Linhas | Resumo |")
-        lines.append("|----|---------|-----|------|--------|--------|")
-        for s in validated:
-            lines.append(
-                f"| {s.get('id','?')} | {s.get('file','?')} | {s.get('severity','?')} | {s.get('type','?')} | "
-                f"{s.get('_line_start')}..{s.get('_line_end')} | {truncate(s.get('rationale',''), 70)} |"
-            )
-    else:
-        lines.append("_Nenhuma sugestão validada._")
-
-    table = "\n".join(lines)
-
-    return (
-        f"<!-- {marker} -->\n\n"
-        f"**Análise Automatizada (LLM)**\n\n"
-        f"**Resumo:** {summary}\n\n"
-        f"**Veredito:** {verdict}\n\n"
-        f"### Sugestões\n{table}\n\n"
-        f"_Aplique individualmente via 'Apply suggestion' nos comentários inline._"
-    )
-
-def truncate(text: str, max_len: int) -> str:
-    return text if len(text) <= max_len else text[:max_len-3] + "..."
-
-def upsert_main_comment(pr, body: str, marker: str):
-    existing = None
-    for c in pr.get_issue_comments():
-        if c.body and c.body.startswith(f"<!-- {marker}"):
-            existing = c
-            break
-    if existing:
-        existing.edit(body)
-    else:
-        pr.create_issue_comment(body)
-
-def create_inline_review(pr, validated: List[Dict[str, Any]], allow_multi_line: bool):
-    if not validated:
-        print("Nenhuma sugestão validada para inline.")
-        return
-
-    comments_payload = []
-    for s in validated:
-        file = s["file"]
-        line_start = s["_line_start"]
-        line_end = s["_line_end"]
-        replacement_lines = s["replacement"]
-        rationale = s.get("rationale", "")
-        sid = s.get("id", "")
-        severity = s.get("severity", "")
-        stype = s.get("type", "")
-
-        replacement_text = "\n".join(replacement_lines)
-        suggestion_block = f"```suggestion\n{replacement_text}\n```"
-        header = f"{sid} ({severity}/{stype})"
-        body = f"{header}\n\n{rationale}\n\n{suggestion_block}"
-
-        if allow_multi_line and line_end > line_start:
-            comments_payload.append({
-                "path": file,
-                "body": body,
-                "start_line": line_start,
-                "line": line_end,
-                "side": "RIGHT",
-                "start_side": "RIGHT"
-            })
-        else:
-            comments_payload.append({
-                "path": file,
-                "body": body,
-                "line": line_start,
-                "side": "RIGHT"
-            })
-
-    if not comments_payload:
-        print("Payload vazio após preparar comentários.")
-        return
-
-    try:
-        pr.create_review(
-            event="COMMENT",
-            body="Sugestões automáticas (LLM).",
-            comments=comments_payload
-        )
-        print("Review com sugestões criado.")
-    except Exception as e:
-        print(f"Falha ao criar review (multi-line?). Tentando fallback. Erro: {e}")
-        fallback = []
-        for c in comments_payload:
-            if "start_line" in c:
-                fallback.append({
-                    "path": c["path"],
-                    "body": c["body"],
-                    "line": c["line"],
-                    "side": "RIGHT"
-                })
-            else:
-                fallback.append(c)
-        if fallback:
-            try:
-                pr.create_review(
-                    event="COMMENT",
-                    body="Sugestões automáticas (fallback).",
-                    comments=fallback
-                )
-                print("Review fallback criado.")
-            except Exception as e2:
-                print(f"Falha no fallback: {e2}")
-
-# --------------------------------------------------
-# Main
-# --------------------------------------------------
+# ---------- Main ----------
 def main():
-    repo_fullname = os.environ["GITHUB_REPOSITORY"]
-    pr_number = int(os.environ["PR_NUMBER"])
-    gh_token = os.environ["GITHUB_TOKEN"]
-    marker = os.environ.get("COMMENT_TAG", "azure-openai-pr-review")
-    enable_inline = os.environ.get("ENABLE_INLINE_SUGGESTIONS", "true").lower() == "true"
-    allow_multi_line = os.environ.get("ALLOW_MULTI_LINE", "false").lower() == "true"
-
-    print(f"🔍 Analisando PR #{pr_number} em {repo_fullname} (multi-line={allow_multi_line})")
-
-    pr, repo, patch, files_meta, truncated = get_pr_and_patch(repo_fullname, pr_number, gh_token)
-
-    if not patch:
-        print("ℹ️ Nenhum patch restante (provavelmente só arquivos excluídos). Nada a comentar.")
+    # Filtra por arquivos relevantes
+    changed = gather_changed_files(base_sha, head_sha)
+    if not changed:
+        print("No allowed files changed; nothing to review.")
         return
 
-    try:
-        model_data = call_llm_for_suggestions(patch, truncated)
-    except Exception as e:
-        print(f"Erro LLM: {e}")
-        model_data = {"summary": f"Falha LLM: {e}", "verdict": "Needs Work", "suggestions": []}
+    raw_diff = git_diff(base_sha, head_sha)
+    if not raw_diff.strip():
+        print("Empty diff; nothing to review.")
+        return
 
-    added_index = build_added_lines_index(patch)
-    validated = validate_and_localize_suggestions(model_data, added_index, allow_multi_line)
+    # Evitar payloads gigantes
+    MAX_CHARS = 120_000
+    payload_diff = raw_diff[:MAX_CHARS]
 
-    comment_body = build_main_comment(model_data, validated, marker)
-    upsert_main_comment(pr, comment_body, marker)
+    system = "You are a meticulous code review assistant for GitHub Pull Requests."
+    user = build_prompt(payload_diff)
 
-    if enable_inline and not truncated:
-        create_inline_review(pr, validated, allow_multi_line)
-    elif truncated:
-        print("Patch truncado — ignorando sugestões inline.")
+    print("Calling Azure OpenAI...")
+    review = call_azure_openai(system, user)
 
-    print("✅ Finalizado.")
+    # Salva artefato
+    with open("ai_suggestions.md", "w", encoding="utf-8") as f:
+        f.write(review)
+
+    # Posta comentário na PR
+    body = "### 🤖 AI Code Review\n\n" + review
+    post_pr_comment(body)
+
+    # Modo seguro: não gerar/apply patch automaticamente.
+    # Se quiser auto-commit real, gere um patch válido (git apply) ou use a API de "suggested changes" via review.
+    if AUTO_COMMIT:
+        print("AUTO_COMMIT requested, but this sample keeps changes as suggestions only for safety.")
+        # Estratégia robusta (implantar depois):
+        # 1) Fazer parsing de blocos ```suggestion
+        # 2) Mapear para arquivos/linhas exatas
+        # 3) Editar arquivos localmente e dar git commit/push
+        # Aqui deixamos intencionalmente desativado por segurança.
+
+    print("AI review completed.")
 
 if __name__ == "__main__":
     main()
