@@ -51,7 +51,7 @@ def gather_changed_files(base: str, head: str):
 def call_azure_openai(system_prompt: str, user_prompt: str) -> str:
     if not (AZ_ENDPOINT and AZ_API_KEY and AZ_DEPLOYMENT):
         raise RuntimeError("Azure OpenAI vars missing")
-    url = f"{AZ_ENDPOINT}/openai/deployments/{AZ_DEPLOYMENT}/chat/completions?api-version=2024-10-01-preview"
+    url = f"{AZ_ENDPOINT}/openai/deployments/{AZ_DEPLOYMENT}/chat/completions?api-version=2025-01-01-preview"
     headers = {"api-key": AZ_API_KEY, "Content-Type": "application/json"}
     payload = {
         "messages": [
