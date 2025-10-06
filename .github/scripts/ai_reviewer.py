@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os, sys, json, subprocess, pathlib, textwrap, requests
 
 ALLOWED_EXTS = {
@@ -72,7 +73,7 @@ def post_pr_comment(body: str):
         print("Failed to post PR comment:", r.status_code, r.text)
 
 def build_prompt(diff_text: str) -> str:
-    instructions = textwrap.dedent("""
+    instructions = textwrap.dedent("""\
     You are a senior code reviewer. Review the provided unified diff from a GitHub Pull Request.
     - Identify bugs, smells, missing validations, performance or security issues.
     - When proposing small edits, use GitHub-style code suggestions with fenced blocks:
