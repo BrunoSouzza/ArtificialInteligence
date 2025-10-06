@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import os, json, textwrap, requests
 from github import Github, Auth
@@ -50,7 +50,7 @@ def main():
         print("Nothing to review.")
         return
     review = call_llm(patch)
-    pr.create_issue_comment("### ?? AI Code Review\n\n" + review)
+    pr.create_issue_comment("### 🤖 AI Code Review\n\n" + review)
     print("Suggestions posted.")
 
 if __name__ == "__main__":
