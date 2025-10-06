@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import os, json, textwrap, requests
 from github import Github, Auth
