@@ -76,16 +76,14 @@ def build_prompt(diff_text: str) -> str:
     instructions = textwrap.dedent("""
     You are a senior code reviewer. Review the provided unified diff from a GitHub Pull Request.
     - Identify bugs, smells, missing validations, performance or security issues.
-    - When proposing small edits, use GitHub-style code suggestions with fenced blocks:
+    - When proposing small edits, use GitHub-style suggestion blocks with fenced code:
 
-
-```
+````suggestion
       <replacement code>
-
-```
+````
 
     - Keep suggestions minimal and directly applicable.
-    - For larger refactors, describe the change and include the most critical snippet as a suggestion.
+    - For larger refactors, describe the change and include the most critical snippet as a suggestion (also using a suggestion block).
     - IMPORTANT: Preserve indentation and syntax; do not include file headers inside suggestion blocks.
     """).strip()
     return instructions + "\n\nDIFF:\n" + diff_text
