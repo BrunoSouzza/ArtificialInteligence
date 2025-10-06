@@ -41,7 +41,7 @@ def run(cmd: str) -> str:
     return subprocess.check_output(cmd, shell=True, text=True).strip()
 
 def git_diff(base: str, head: str) -> str:
-    # diff unificado com contexto suficiente
+    # unified diff with enough context
     return run(f"git diff {base}..{head}")
 
 def gather_changed_files(base: str, head: str):
@@ -73,7 +73,7 @@ def post_pr_comment(body: str):
         print("Failed to post PR comment:", r.status_code, r.text)
 
 def build_prompt(diff_text: str) -> str:
-    instructions = textwrap.dedent("""\
+    instructions = textwrap.dedent("""
     You are a senior code reviewer. Review the provided unified diff from a GitHub Pull Request.
     - Identify bugs, smells, missing validations, performance or security issues.
     - When proposing small edits, use GitHub-style code suggestions with fenced blocks:
@@ -92,7 +92,7 @@ def build_prompt(diff_text: str) -> str:
 
 # ---------- Main ----------
 def main():
-    # Filtra por arquivos relevantes
+    # Filter for relevant files
     changed = gather_changed_files(base_sha, head_sha)
     if not changed:
         print("No allowed files changed; nothing to review.")
@@ -103,7 +103,7 @@ def main():
         print("Empty diff; nothing to review.")
         return
 
-    # Evitar payloads gigantes
+    # Avoid huge payloads
     MAX_CHARS = 120_000
     payload_diff = raw_diff[:MAX_CHARS]
 
@@ -113,23 +113,23 @@ def main():
     print("Calling Azure OpenAI...")
     review = call_azure_openai(system, user)
 
-    # Salva artefato
+    # Save artifact
     with open("ai_suggestions.md", "w", encoding="utf-8") as f:
         f.write(review)
 
-    # Posta comentário na PR
+    # Post comment on PR
     body = "### ?? AI Code Review\n\n" + review
     post_pr_comment(body)
 
-    # Modo seguro: não gerar/apply patch automaticamente.
-    # Se quiser auto-commit real, gere um patch válido (git apply) ou use a API de "suggested changes" via review.
+    # Safe mode: do not auto-apply patch.
+    # If you want auto-commit, generate a valid patch (git apply) or use the suggested changes API.
     if AUTO_COMMIT:
         print("AUTO_COMMIT requested, but this sample keeps changes as suggestions only for safety.")
-        # Estratégia robusta (implantar depois):
-        # 1) Fazer parsing de blocos ```suggestion
-        # 2) Mapear para arquivos/linhas exatas
-        # 3) Editar arquivos localmente e dar git commit/push
-        # Aqui deixamos intencionalmente desativado por segurança.
+        # Robust strategy (implement later):
+        # 1) Parse suggestion blocks
+        # 2) Map to exact files/lines
+        # 3) Edit files locally and git commit/push
+        # Intentionally disabled for safety.
 
     print("AI review completed.")
 

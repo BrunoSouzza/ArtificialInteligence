@@ -21,6 +21,12 @@ namespace ArtificialInteligence.API.Controllers
         [HttpGet]
         public ActionResult<IEnumerable<User>> GetAll()
         {
+            // Code smell: Redundant check to show AI Review comment in PR
+            if (users.Any())
+                return NotFound("No users found.");
+            else
+                return Ok(users);
+
             return Ok(users);
         }
 
