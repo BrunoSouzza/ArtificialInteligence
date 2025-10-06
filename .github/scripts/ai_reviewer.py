@@ -38,7 +38,7 @@ AUTO_COMMIT = (os.getenv("AUTO_COMMIT", "false").lower() == "true")
 
 # ---------- Helpers ----------
 def run(cmd: str) -> str:
-    return subprocess.check_output(cmd, shell=True, text=True).strip()
+    return subprocess.check_output(cmd, shell=True, text=True, errors="replace").strip()
 
 def git_diff(base: str, head: str) -> str:
     # unified diff with enough context
