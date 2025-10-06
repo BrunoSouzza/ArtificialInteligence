@@ -40,5 +40,6 @@ jobs:
           AZURE_OPENAI_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
           AZURE_OPENAI_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_DEPLOYMENT }}  # ex: gpt-4o-mini
           AUTO_COMMIT: false
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           python .github/scripts/ai_reviewer.py
