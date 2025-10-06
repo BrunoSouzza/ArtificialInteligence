@@ -22,16 +22,16 @@ def call_llm(patch):
     deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
     url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version=2024-10-21"
     prompt = textwrap.dedent(f"""
-    Você é um revisor de código. Para cada melhoria, gere um bloco suggestion do GitHub:
+    You are a code reviewer. For each improvement, generate a GitHub suggestion block:
     ````suggestion
-    <código sugerido>
+    <replacement code>
     ````
     PATCH:
     {patch}
     """).strip()
     body = {
         "messages": [
-            {"role": "system", "content": "Responda apenas com sugestões em blocos suggestion."},
+            {"role": "system", "content": "Respond only with suggestions in suggestion blocks."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.2
@@ -47,11 +47,11 @@ def main():
     gh_token = os.environ["GITHUB_TOKEN"]
     pr, patch = get_pr_and_patch(repo_fullname, pr_number, gh_token)
     if not patch:
-        print("Nada a revisar.")
+        print("Nothing to review.")
         return
     review = call_llm(patch)
     pr.create_issue_comment("### ?? AI Code Review\n\n" + review)
-    print("Sugestões postadas.")
+    print("Suggestions posted.")
 
 if __name__ == "__main__":
     main()
